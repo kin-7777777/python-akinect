@@ -5,6 +5,73 @@ from helpers import colorize, convert_to_bgra_if_required
 
 import pickle as pkl
 import subprocess
+import os
+
+# Taken from Datta's azure-acquire repository.
+def write_frames(filename, frames, threads=6, fps=30, crf=10,
+                 pixel_format='gray16', codec='ffv1', close_pipe=True,
+                 pipe=None, slices=24, slicecrc=1, frame_size=None, get_cmd=False):
+    """
+    Write frames to avi file using the ffv1 lossless encoder
+
+    Args:
+        filename (str): path to the file to write the frames to.
+        frames (numpy.ndarray): frames to write to file
+        threads (int, optional): the number of threads for multiprocessing. Defaults to 6.
+        fps (int, optional): camera frame rate. Defaults to 30.
+        crf (int, optional): constant rate factor for ffmpeg, a lower value leads to higher quality. Defaults to 10.
+        pixel_format (str, optional): pixel format for ffmpeg. Defaults to 'gray8'.
+        codec (str, optional): codec option for ffmpeg. Defaults to 'h264'.
+        close_pipe (bool, optional): boolean flag for closing ffmpeg pipe. Defaults to True.
+        pipe (subprocess.pipe, optional): ffmpeg pipe for writing the video. Defaults to None.
+        slices (int, optional): number of slicing in parallel encoding. Defaults to 24.
+        slicecrc (int, optional): protect slices with cyclic redundency check. Defaults to 1.
+        frame_size (str, optional): size of the frame, ie 640x576. Defaults to None.
+        get_cmd (bool, optional): boolean flag for outputtting ffmpeg command. Defaults to False.
+
+    Returns:
+        pipe (subprocess.pipe, optional): ffmpeg pipe for writing the video.
+    """
+ 
+    # we probably want to include a warning about multiples of 32 for videos
+    # (then we can use pyav and some speedier tools)
+
+    if not frame_size and type(frames) is np.ndarray:
+        frame_size = '{0:d}x{1:d}'.format(frames.shape[2], frames.shape[1])
+
+    command = ['ffmpeg',
+               '-y',
+               '-loglevel', 'fatal',
+               '-framerate', str(fps),
+               '-f', 'rawvideo',
+               '-s', frame_size,
+               '-pix_fmt', pixel_format,
+               '-i', '-',
+               '-an',
+               '-crf',str(crf),
+               '-vcodec', codec,
+               '-preset', 'ultrafast',
+               '-threads', str(threads),
+               '-slices', str(slices),
+               '-slicecrc', str(slicecrc),
+               '-r', str(fps),
+               filename]
+
+    if get_cmd:
+        return command
+
+    if not pipe:
+        pipe = subprocess.Popen(
+            command, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    for i in range(frames.shape[0]):
+        pipe.stdin.write(frames[i,:,:].tobytes())
+
+    if close_pipe:
+        pipe.stdin.close()
+        return None
+    else:
+        return pipe
 
 name_prefix = "20230627"
 
@@ -31,6 +98,8 @@ playback = PyK4APlayback(read_filename)
 playback.open()
 
 depth_data = []
+
+depth_pipe = None
  
 # Read until video is completed
 while True:
@@ -63,32 +132,17 @@ while True:
       # Save depth data for moseq2
       depth_save = depth_cropped
       depth_save = depth_save.astype(np.uint16)[None,:,:]
+      depth_pipe = write_frames(os.path.join(save_folder+'/'+name_prefix, 'depth_data_moseq2.avi'), depth_save, codec='ffv1', close_pipe=False, pipe=depth_pipe, pixel_format='gray16')
       
-      frame_size = '{0:d}x{1:d}'.format(depth_save.shape[2], depth_save.shape[1])
-      command = ['ffmpeg',
-            '-y',
-            '-loglevel', 'fatal',
-            '-framerate', str(fps),
-            '-f', 'rawvideo',
-            '-s', frame_size,
-            '-pix_fmt', 'gray16',
-            '-i', '-',
-            '-an',
-            '-crf',str(10),
-            '-vcodec', 'ffv1',
-            '-preset', 'ultrafast',
-            '-threads', str(1),
-            '-slices', str('24'),
-            '-slicecrc', str('1'),
-            '-r', str(fps),
-            filename]
     key = cv2.waitKey(10)
     if key != -1:
         break
   except EOFError:
       break
+
 out_ir.release()
 out_depth.release()
+depth_pipe.stdin.close()
 cv2.destroyAllWindows()
 
 # print("Saving depth data...")
